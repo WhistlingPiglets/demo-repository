@@ -1,0 +1,79 @@
+name: Sync PR Diff to Port
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  sync-pr-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR files and diff
+        id: pr-info
+        run: |
+          # Get changed files
+          FILES=$(gh pr diff ${{ github.event.pull_request.number }} --name-only)
+          
+          # Get diff content (truncated for size)
+          DIFF=$(gh pr diff ${{ github.event.pull_request.number }} | head -c 8000)
+          
+          # Format files as JSON array
+          FILES_JSON=$(echo "$FILES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          
+          # Create markdown content
+          DIFF_CONTENT="## 📊 Change Summary\n\n"
+          DIFF_CONTENT+="- **Files Changed:** ${{ github.event.pull_request.changed_files }}\n"
+          DIFF_CONTENT+="- **Lines Added:** +${{ github.event.pull_request.additions }}\n"
+          DIFF_CONTENT+="- **Lines Deleted:** -${{ github.event.pull_request.deletions }}\n\n"
+          
+          DIFF_CONTENT+="## 📁 Modified Files\n\n"
+          echo "$FILES" | while read -r file; do
+            if [ ! -z "$file" ]; then
+              DIFF_CONTENT+="- \`$file\`\n"
+            fi
+          done
+          
+          DIFF_CONTENT+="\n## 🔍 Code Changes\n\n"
+          DIFF_CONTENT+="\`\`\`diff\n$DIFF\n\`\`\`\n\n"
+          DIFF_CONTENT+="[📖 View Full Diff on GitHub](${{ github.event.pull_request.html_url }}/files)"
+          
+          # Output for next step
+          echo "files_json=$FILES_JSON" >> $GITHUB_OUTPUT
+          echo "diff_content<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$DIFF_CONTENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get Port Access Token
+        id: port-auth
+        run: |
+          ACCESS_TOKEN=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"client_id": "${{ secrets.PORT_CLIENT_ID }}", "client_secret": "${{ secrets.PORT_CLIENT_SECRET }}"}' \
+            "https://api.getport.io/v1/auth/access_token" | jq -r '.accessToken')
+          echo "token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Update Port Entity
+        run: |
+          # Escape the diff content for JSON
+          DIFF_ESCAPED=$(echo '${{ steps.pr-info.outputs.diff_content }}' | jq -R -s .)
+          
+          curl -X PATCH \
+            -H "Authorization: Bearer ${{ steps.port-auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"properties\": {
+                \"diffContent\": $DIFF_ESCAPED,
+                \"additions\": ${{ github.event.pull_request.additions }},
+                \"deletions\": ${{ github.event.pull_request.deletions }},
+                \"changedFiles\": ${{ github.event.pull_request.changed_files }},
+                \"filesChanged\": ${{ steps.pr-info.outputs.files_json }}
+              }
+            }" \
+            "https://api.getport.io/v1/blueprints/githubPullRequest/entities/${{ github.event.pull_request.id }}"
