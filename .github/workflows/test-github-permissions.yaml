@@ -1,0 +1,57 @@
+name: Test GitHub Permissions
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR Number to test'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test-permissions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test PR Access
+        run: |
+          echo "🔍 Testing PR #${{ inputs.pr_number }}"
+          
+          # Get PR info
+          RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/WhistlingPiglets/demo-repository/pulls/${{ inputs.pr_number }}")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
+          
+          echo "Response Code: $HTTP_CODE"
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Can access PR"
+            
+            # Check PR details
+            TITLE=$(echo "$BODY" | jq -r '.title')
+            STATE=$(echo "$BODY" | jq -r '.state')
+            AUTHOR=$(echo "$BODY" | jq -r '.user.login')
+            MERGEABLE=$(echo "$BODY" | jq -r '.mergeable_state')
+            
+            echo "Title: $TITLE"
+            echo "State: $STATE"
+            echo "Author: $AUTHOR"
+            echo "Mergeable: $MERGEABLE"
+            
+            # Check if we can approve (can't approve own PRs)
+            if [ "$AUTHOR" = "WhistlingPiglets" ]; then
+              echo "⚠️  Cannot approve own PR - this is normal GitHub behavior"
+            else
+              echo "✅ Should be able to approve this PR"
+            fi
+            
+          else
+            echo "❌ Cannot access PR: $BODY"
+          fi
