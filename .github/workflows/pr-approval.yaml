@@ -1,4 +1,4 @@
-name: PR Approval via Port (Simple)
+name: PR Approval via Port
 
 on:
   workflow_dispatch:
@@ -29,6 +29,17 @@ jobs:
   approve-pr:
     runs-on: ubuntu-latest
     steps:
+      - name: Debug Inputs
+        run: |
+          echo "🔍 Debug Info:"
+          echo "PR URL: ${{ inputs.pr_url }}"
+          echo "PR Number: ${{ inputs.pr_number }}"
+          echo "Run ID: ${{ inputs.run_id }}"
+          echo "Approval Comment: '${{ inputs.approval_comment }}'"
+          echo "Comment Length: ${#comment}"
+        env:
+          comment: ${{ inputs.approval_comment }}
+
       - name: Get Port Token
         id: port-auth
         run: |
@@ -46,21 +57,6 @@ jobs:
             echo "❌ Port authentication failed"
             exit 1
           fi
-
-      - name: Update Port - Starting
-        run: |
-          echo "🔄 Updating Port with start status..."
-          
-          curl -X PATCH \
-            -H "Authorization: Bearer ${{ steps.port-auth.outputs.TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "status": "IN_PROGRESS",
-              "message": {
-                "run_status": "🔄 Starting PR approval for #${{ inputs.pr_number }}...\n\n📋 **Details:**\n- Comment: \"${{ inputs.approval_comment }}\""
-              }
-            }' \
-            "https://api.getport.io/v1/actions/runs/${{ inputs.run_id }}"
 
       - name: Extract Repository Info
         id: repo-info
@@ -80,28 +76,41 @@ jobs:
         run: |
           echo "🚀 Approving PR #${{ inputs.pr_number }}"
           
+          # Set default comment if empty or null
+          COMMENT="${{ inputs.approval_comment }}"
+          if [ -z "$COMMENT" ] || [ "$COMMENT" = "null" ]; then
+            COMMENT="Approved via Port 🚀"
+          fi
+          
+          echo "Using comment: $COMMENT"
+          
+          # Create approval review
           RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
             -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ steps.repo-info.outputs.OWNER }}/${{ steps.repo-info.outputs.REPO }}/pulls/${{ inputs.pr_number }}/reviews" \
-            -d '{
-              "event": "APPROVE",
-              "body": "${{ inputs.approval_comment }}"
-            }')
+            -d "{
+              \"event\": \"APPROVE\",
+              \"body\": \"$COMMENT\"
+            }")
           
           HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
           BODY=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
           
           echo "Response Code: $HTTP_CODE"
+          echo "Response Body: $BODY"
           
           if [ "$HTTP_CODE" = "200" ]; then
             echo "✅ PR approved successfully!"
             echo "SUCCESS=true" >> $GITHUB_OUTPUT
+            echo "MESSAGE=Pull request approved successfully!" >> $GITHUB_OUTPUT
           else
             echo "❌ Failed to approve PR (HTTP: $HTTP_CODE)"
-            echo "ERROR=$BODY" >> $GITHUB_OUTPUT
+            # Clean the error message for output
+            CLEAN_ERROR=$(echo "$BODY" | tr '\n' ' ' | tr '"' "'" | head -c 200)
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
+            echo "MESSAGE=Failed to approve PR: HTTP $HTTP_CODE - $CLEAN_ERROR" >> $GITHUB_OUTPUT
           fi
 
       - name: Update Port - Success
@@ -109,15 +118,20 @@ jobs:
         run: |
           echo "🎉 Updating Port with success..."
           
-          curl -X PATCH \
+          COMMENT="${{ inputs.approval_comment }}"
+          if [ -z "$COMMENT" ] || [ "$COMMENT" = "null" ]; then
+            COMMENT="Approved via Port 🚀"
+          fi
+          
+          curl -s -X PATCH \
             -H "Authorization: Bearer ${{ steps.port-auth.outputs.TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "status": "SUCCESS",
-              "message": {
-                "run_status": "✅ **Pull Request Approved!**\n\n🎉 PR #${{ inputs.pr_number }} approved with comment: \"${{ inputs.approval_comment }}\"\n\n🔗 [View PR](${{ inputs.pr_url }})"
+            -d "{
+              \"status\": \"SUCCESS\",
+              \"message\": {
+                \"run_status\": \"✅ **Pull Request Approved!**\\n\\n🎉 PR #${{ inputs.pr_number }} approved with comment: \\\"$COMMENT\\\"\\n\\n🔗 [View PR](${{ inputs.pr_url }})\"
               }
-            }' \
+            }" \
             "https://api.getport.io/v1/actions/runs/${{ inputs.run_id }}"
 
       - name: Update Port - Failure
@@ -125,15 +139,15 @@ jobs:
         run: |
           echo "💥 Updating Port with failure..."
           
-          curl -X PATCH \
+          curl -s -X PATCH \
             -H "Authorization: Bearer ${{ steps.port-auth.outputs.TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "status": "FAILURE", 
-              "message": {
-                "run_status": "❌ **Failed to Approve PR**\n\nError: ${{ steps.approve.outputs.ERROR }}\n\nCheck GitHub permissions."
+            -d "{
+              \"status\": \"FAILURE\", 
+              \"message\": {
+                \"run_status\": \"❌ **Failed to Approve PR**\\n\\n${{ steps.approve.outputs.MESSAGE }}\\n\\nPlease check GitHub permissions and try again.\"
               }
-            }' \
+            }" \
             "https://api.getport.io/v1/actions/runs/${{ inputs.run_id }}"
           
           exit 1
