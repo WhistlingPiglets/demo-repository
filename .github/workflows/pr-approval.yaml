@@ -1,0 +1,127 @@
+name: Approve Pull Request
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_url:
+        description: 'Pull Request URL'
+        required: true
+        type: string
+      pr_number:
+        description: 'Pull Request Number'
+        required: true
+        type: string
+      approval_comment:
+        description: 'Approval Comment'
+        required: false
+        type: string
+        default: 'Approved via Port 🚀'
+      port_context:
+        description: 'Port context'
+        required: true
+        type: string
+
+jobs:
+  approve-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse Port Context
+        id: parse-context
+        run: |
+          echo '${{ inputs.port_context }}' | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> $GITHUB_ENV
+
+      - name: Update Port - Starting Approval
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: |
+            🔄 Starting PR approval process...
+            
+            📋 **Details:**
+            - PR #${{ inputs.pr_number }}
+            - Comment: "${{ inputs.approval_comment }}"
+
+      - name: Extract Repository Info
+        id: repo-info
+        run: |
+          # Extract owner and repo from PR URL
+          REPO_INFO=$(echo "${{ inputs.pr_url }}" | sed -n 's|https://github.com/\([^/]*\)/\([^/]*\)/pull/.*|\1/\2|p')
+          OWNER=$(echo "$REPO_INFO" | cut -d'/' -f1)
+          REPO=$(echo "$REPO_INFO" | cut -d'/' -f2)
+          
+          echo "OWNER=$OWNER" >> $GITHUB_ENV
+          echo "REPO=$REPO" >> $GITHUB_ENV
+          echo "Repository: $OWNER/$REPO"
+
+      - name: Approve Pull Request
+        id: approve
+        run: |
+          echo "🔍 Approving PR #${{ inputs.pr_number }} in $OWNER/$REPO"
+          
+          # Create approval review
+          RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+            -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$OWNER/$REPO/pulls/${{ inputs.pr_number }}/reviews" \
+            -d '{
+              "event": "APPROVE",
+              "body": "${{ inputs.approval_comment }}"
+            }')
+          
+          HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
+          
+          echo "Response Code: $HTTP_CODE"
+          echo "Response Body: $BODY"
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ PR approved successfully!"
+            echo "APPROVAL_SUCCESS=true" >> $GITHUB_ENV
+            echo "APPROVAL_MESSAGE=Pull request approved successfully! ✅" >> $GITHUB_ENV
+          else
+            echo "❌ Failed to approve PR"
+            echo "APPROVAL_SUCCESS=false" >> $GITHUB_ENV
+            echo "APPROVAL_MESSAGE=Failed to approve PR: HTTP $HTTP_CODE" >> $GITHUB_ENV
+            echo "ERROR_DETAILS=$BODY" >> $GITHUB_ENV
+          fi
+
+      - name: Update Port - Success
+        if: env.APPROVAL_SUCCESS == 'true'
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: |
+            ✅ **Pull Request Approved Successfully!**
+            
+            🎉 PR #${{ inputs.pr_number }} has been approved with comment: "${{ inputs.approval_comment }}"
+            
+            🔗 [View PR](${{ inputs.pr_url }})
+
+      - name: Update Port - Failure
+        if: env.APPROVAL_SUCCESS == 'false'
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: |
+            ❌ **Failed to Approve Pull Request**
+            
+            Error: ${{ env.APPROVAL_MESSAGE }}
+            
+            Please check the GitHub permissions and try again.
+
+      - name: Fail if approval failed
+        if: env.APPROVAL_SUCCESS == 'false'
+        run: |
+          echo "❌ PR approval failed: ${{ env.APPROVAL_MESSAGE }}"
+          echo "Error details: ${{ env.ERROR_DETAILS }}"
+          exit 1
