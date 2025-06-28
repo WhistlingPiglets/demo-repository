@@ -1,4 +1,4 @@
-name: Sync PR Diff to Port (Simple)
+name: Sync PR Diff to Port (Debug)
 
 on:
   pull_request:
@@ -20,6 +20,19 @@ jobs:
         run: |
           pip install requests
 
+      - name: Debug Environment Variables
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+        run: |
+          echo "🔍 Debug Info:"
+          echo "PR Number: ${{ github.event.pull_request.number }}"
+          echo "PR ID: ${{ github.event.pull_request.id }}"
+          echo "CLIENT_ID present: $([ ! -z "$PORT_CLIENT_ID" ] && echo 'Yes' || echo 'No')"
+          echo "CLIENT_SECRET present: $([ ! -z "$PORT_CLIENT_SECRET" ] && echo 'Yes' || echo 'No')"
+          echo "CLIENT_ID length: ${#PORT_CLIENT_ID}"
+          echo "CLIENT_SECRET length: ${#PORT_CLIENT_SECRET}"
+
       - name: Process PR and update Port
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -40,9 +53,15 @@ jobs:
           import requests
           import json
           import subprocess
+          import sys
+          
+          def debug_print(message):
+              """Print debug message with emoji"""
+              print(f"🔧 DEBUG: {message}")
           
           def get_pr_files():
               """Get list of changed files using gh CLI"""
+              debug_print("Getting changed files...")
               try:
                   result = subprocess.run(
                       ['gh', 'pr', 'diff', os.environ['PR_NUMBER'], '--name-only'],
@@ -51,12 +70,15 @@ jobs:
                       check=True
                   )
                   files = [f.strip() for f in result.stdout.split('\n') if f.strip()]
+                  debug_print(f"Found {len(files)} changed files")
                   return files
-              except subprocess.CalledProcessError:
+              except subprocess.CalledProcessError as e:
+                  debug_print(f"Error getting files: {e}")
                   return []
           
           def get_pr_diff():
               """Get PR diff using gh CLI"""
+              debug_print("Getting PR diff...")
               try:
                   result = subprocess.run(
                       ['gh', 'pr', 'diff', os.environ['PR_NUMBER']],
@@ -68,12 +90,15 @@ jobs:
                   diff = result.stdout
                   if len(diff) > 8000:
                       diff = diff[:8000] + "\n\n... (diff truncated)"
+                  debug_print(f"Got diff, length: {len(diff)} chars")
                   return diff
-              except subprocess.CalledProcessError:
+              except subprocess.CalledProcessError as e:
+                  debug_print(f"Error getting diff: {e}")
                   return "Error retrieving diff"
           
           def create_diff_content():
               """Create formatted markdown content"""
+              debug_print("Creating formatted content...")
               files = get_pr_files()
               diff = get_pr_diff()
               
@@ -106,53 +131,104 @@ jobs:
               return content, files
           
           def get_port_token():
-              """Get Port access token"""
-              response = requests.post(
-                  'https://api.getport.io/v1/auth/access_token',
-                  json={
-                      'client_id': os.environ['PORT_CLIENT_ID'],
-                      'client_secret': os.environ['PORT_CLIENT_SECRET']
-                  }
-              )
-              response.raise_for_status()
-              return response.json()['accessToken']
+              """Get Port access token with detailed error handling"""
+              debug_print("Attempting Port authentication...")
+              
+              client_id = os.environ.get('PORT_CLIENT_ID', '').strip()
+              client_secret = os.environ.get('PORT_CLIENT_SECRET', '').strip()
+              
+              if not client_id or not client_secret:
+                  raise Exception("PORT_CLIENT_ID or PORT_CLIENT_SECRET is empty")
+              
+              debug_print(f"Client ID length: {len(client_id)}")
+              debug_print(f"Client Secret length: {len(client_secret)}")
+              
+              payload = {
+                  'client_id': client_id,
+                  'client_secret': client_secret
+              }
+              
+              debug_print("Sending authentication request...")
+              
+              try:
+                  response = requests.post(
+                      'https://api.getport.io/v1/auth/access_token',
+                      json=payload,
+                      timeout=30
+                  )
+                  
+                  debug_print(f"Auth response status: {response.status_code}")
+                  
+                  if response.status_code == 200:
+                      token = response.json().get('accessToken')
+                      debug_print("✅ Authentication successful!")
+                      return token
+                  else:
+                      debug_print(f"❌ Auth failed: {response.status_code}")
+                      debug_print(f"Response: {response.text}")
+                      raise Exception(f"Port authentication failed: {response.status_code} - {response.text}")
+                      
+              except requests.exceptions.RequestException as e:
+                  debug_print(f"❌ Network error: {e}")
+                  raise Exception(f"Network error during authentication: {e}")
           
           def update_port_entity():
               """Update Port entity with diff content"""
-              diff_content, files = create_diff_content()
-              token = get_port_token()
+              debug_print("Starting Port entity update...")
               
-              url = f"https://api.getport.io/v1/blueprints/githubPullRequest/entities/{os.environ['PR_ID']}"
-              
-              payload = {
-                  'properties': {
-                      'diffContent': diff_content,
-                      'additions': int(os.environ['PR_ADDITIONS']),
-                      'deletions': int(os.environ['PR_DELETIONS']),
-                      'changedFiles': int(os.environ['PR_CHANGED_FILES']),
-                      'filesChanged': files
+              try:
+                  diff_content, files = create_diff_content()
+                  token = get_port_token()
+                  
+                  url = f"https://api.getport.io/v1/blueprints/githubPullRequest/entities/{os.environ['PR_ID']}"
+                  debug_print(f"Target URL: {url}")
+                  
+                  payload = {
+                      'properties': {
+                          'diffContent': diff_content,
+                          'additions': int(os.environ['PR_ADDITIONS']),
+                          'deletions': int(os.environ['PR_DELETIONS']),
+                          'changedFiles': int(os.environ['PR_CHANGED_FILES']),
+                          'filesChanged': files
+                      }
                   }
-              }
-              
-              headers = {
-                  'Authorization': f'Bearer {token}',
-                  'Content-Type': 'application/json'
-              }
-              
-              response = requests.patch(url, json=payload, headers=headers)
-              
-              if response.status_code in [200, 201]:
-                  print(f"✅ Successfully updated Port entity {os.environ['PR_ID']}")
-              else:
-                  print(f"❌ Failed to update Port entity: {response.status_code}")
-                  print(f"Response: {response.text}")
-                  exit(1)
+                  
+                  headers = {
+                      'Authorization': f'Bearer {token}',
+                      'Content-Type': 'application/json'
+                  }
+                  
+                  debug_print("Sending entity update request...")
+                  response = requests.patch(url, json=payload, headers=headers, timeout=30)
+                  
+                  debug_print(f"Update response status: {response.status_code}")
+                  
+                  if response.status_code in [200, 201]:
+                      print(f"✅ Successfully updated Port entity {os.environ['PR_ID']}")
+                  else:
+                      print(f"❌ Failed to update Port entity: {response.status_code}")
+                      print(f"Response: {response.text}")
+                      return False
+                      
+                  return True
+                  
+              except Exception as e:
+                  print(f"❌ Error in update_port_entity: {str(e)}")
+                  return False
           
           # Main execution
           if __name__ == "__main__":
+              debug_print("=== Starting PR Diff Sync ===")
+              
               try:
-                  update_port_entity()
+                  success = update_port_entity()
+                  if success:
+                      debug_print("=== Process completed successfully ===")
+                      sys.exit(0)
+                  else:
+                      debug_print("=== Process failed ===")
+                      sys.exit(1)
               except Exception as e:
-                  print(f"❌ Error: {str(e)}")
-                  exit(1)
+                  print(f"❌ Fatal error: {str(e)}")
+                  sys.exit(1)
           EOF
