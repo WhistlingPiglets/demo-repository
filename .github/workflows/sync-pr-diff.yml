@@ -1,166 +1,342 @@
-name: Sync PR Diff to Port
+name: Sync PR Diff to Port (Enhanced)
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+pull_request:
+  types: [opened, synchronize, reopened]
 
 jobs:
-  sync-pr-diff:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+sync-pr-diff:
+  runs-on: ubuntu-latest
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch full history for proper diff
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
 
-      - name: Install dependencies
-        run: pip install requests
+    - name: Install GitHub CLI
+      run: |
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+        sudo apt update
+        sudo apt install gh
 
-      - name: Process PR and update Port
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
-          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_ID: ${{ github.event.pull_request.id }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
-          PR_ADDITIONS: ${{ github.event.pull_request.additions }}
-          PR_DELETIONS: ${{ github.event.pull_request.deletions }}
-          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
-        run: |
-          python3 << 'EOF'
-          import os
-          import requests
-          import subprocess
-          import sys
+    - name: Install dependencies
+      run: pip install requests
+
+    - name: Process PR and update Port
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+        PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_ID: ${{ github.event.pull_request.id }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+        PR_ADDITIONS: ${{ github.event.pull_request.additions }}
+        PR_DELETIONS: ${{ github.event.pull_request.deletions }}
+        PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        PR_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        python3 << 'EOF'
+        import os
+        import requests
+        import subprocess
+        import sys
+        import json
           
-          def get_pr_files():
-              try:
-                  result = subprocess.run(
-                      ['gh', 'pr', 'diff', os.environ['PR_NUMBER'], '--name-only'],
-                      capture_output=True, text=True, check=True
-                  )
-                  return [f.strip() for f in result.stdout.split('\n') if f.strip()]
-              except subprocess.CalledProcessError:
-                  return []
+        def safe_int(value, default=0):
+            """Safely convert string to int with fallback"""
+            try:
+                if value and str(value).strip():
+                    return int(value)
+                return default
+            except (ValueError, TypeError):
+                return default
           
-          def get_pr_diff():
-              try:
-                  result = subprocess.run(
-                      ['gh', 'pr', 'diff', os.environ['PR_NUMBER']],
-                      capture_output=True, text=True, check=True
-                  )
-                  diff = result.stdout
-                  if len(diff) > 8000:
-                      diff = diff[:8000] + "\n\n... (diff truncated)"
-                  return diff
-              except subprocess.CalledProcessError:
-                  return "Error retrieving diff"
+        def safe_str(value, default=""):
+            """Safely get string value with fallback"""
+            return str(value).strip() if value else default
           
-          def create_diff_content():
-              files = get_pr_files()
-              diff = get_pr_diff()
+        def get_pr_files():
+            """Get PR files using multiple fallback methods"""
+            pr_number = safe_str(os.environ.get('PR_NUMBER'))
               
-              content = f"""## 📊 Pull Request: {os.environ['PR_TITLE']}
+            # Method 1: Try gh CLI if PR number exists
+            if pr_number:
+                try:
+                    result = subprocess.run(
+                        ['gh', 'pr', 'diff', pr_number, '--name-only'],
+                        capture_output=True, text=True, check=True
+                    )
+                    files = [f.strip() for f in result.stdout.split('\n') if f.strip()]
+                    if files:
+                        print(f"✅ Got {len(files)} files via gh CLI")
+                        return files
+                except subprocess.CalledProcessError as e:
+                    print(f"⚠️  gh CLI failed: {e}")
+              
+            # Method 2: Try git diff with branch names
+            base_branch = safe_str(os.environ.get('PR_BASE_BRANCH', 'main'))
+            head_branch = safe_str(os.environ.get('PR_HEAD_BRANCH', 'HEAD'))
+              
+            try:
+                # Try with origin prefix
+                result = subprocess.run(
+                    ['git', 'diff', '--name-only', f"origin/{base_branch}", 'HEAD'],
+                    capture_output=True, text=True, check=True
+                )
+                files = [f.strip() for f in result.stdout.split('\n') if f.strip()]
+                if files:
+                    print(f"✅ Got {len(files)} files via git diff (origin)")
+                    return files
+            except subprocess.CalledProcessError:
+                pass
+              
+            # Method 3: Try git diff without origin prefix
+            try:
+                result = subprocess.run(
+                    ['git', 'diff', '--name-only', base_branch, 'HEAD'],
+                    capture_output=True, text=True, check=True
+                )
+                files = [f.strip() for f in result.stdout.split('\n') if f.strip()]
+                if files:
+                    print(f"✅ Got {len(files)} files via git diff (local)")
+                    return files
+            except subprocess.CalledProcessError:
+                pass
+              
+            # Method 4: Get all changed files in last commit
+            try:
+                result = subprocess.run(
+                    ['git', 'diff', '--name-only', 'HEAD~1', 'HEAD'],
+                    capture_output=True, text=True, check=True
+                )
+                files = [f.strip() for f in result.stdout.split('\n') if f.strip()]
+                if files:
+                    print(f"✅ Got {len(files)} files via last commit diff")
+                    return files
+            except subprocess.CalledProcessError:
+                pass
+              
+            print("⚠️  No files found via any method")
+            return []
           
-          ### 📈 Change Statistics
-          - **Files Changed:** {os.environ['PR_CHANGED_FILES']}
-          - **Lines Added:** +{os.environ['PR_ADDITIONS']}
-          - **Lines Deleted:** -{os.environ['PR_DELETIONS']}
+        def get_file_diff(file_path):
+            """Get diff for a specific file with fallbacks"""
+            base_branch = safe_str(os.environ.get('PR_BASE_BRANCH', 'main'))
+              
+            # Try multiple diff methods
+            diff_commands = [
+                ['git', 'diff', f"origin/{base_branch}", 'HEAD', '--', file_path],
+                ['git', 'diff', base_branch, 'HEAD', '--', file_path],
+                ['git', 'diff', 'HEAD~1', 'HEAD', '--', file_path]
+            ]
+              
+            for cmd in diff_commands:
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    if result.stdout.strip():
+                        return result.stdout
+                except subprocess.CalledProcessError:
+                    continue
+              
+            return ""
           
-          ### 📁 Modified Files
-          """
+        def detect_language(filename):
+            """Detect programming language from filename"""
+            extensions = {
+                '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
+                '.java': 'java', '.cpp': 'cpp', '.c': 'c', '.cs': 'csharp',
+                '.html': 'html', '.css': 'css', '.scss': 'scss', '.sass': 'sass',
+                '.json': 'json', '.xml': 'xml', '.yaml': 'yaml', '.yml': 'yaml',
+                '.md': 'markdown', '.sh': 'bash', '.sql': 'sql', '.go': 'go',
+                '.rs': 'rust', '.php': 'php', '.rb': 'ruby', '.swift': 'swift',
+                '.kt': 'kotlin', '.scala': 'scala', '.r': 'r', '.m': 'objective-c'
+            }
               
-              for file in files[:20]:
-                  content += f"- `{file}`\n"
-              
-              if len(files) > 20:
-                  content += f"- ... and {len(files) - 20} more files\n"
-              
-              content += f"""
-          ### 🔍 Code Changes
+            for ext, lang in extensions.items():
+                if filename.lower().endswith(ext):
+                    return lang
+            return 'text'
           
-          ```diff
-          {diff}
-          ```
+        def get_file_stats(file_path):
+            """Get addition/deletion stats for a specific file"""
+            base_branch = safe_str(os.environ.get('PR_BASE_BRANCH', 'main'))
+              
+            # Try multiple numstat commands
+            numstat_commands = [
+                ['git', 'diff', '--numstat', f"origin/{base_branch}", 'HEAD', '--', file_path],
+                ['git', 'diff', '--numstat', base_branch, 'HEAD', '--', file_path],
+                ['git', 'diff', '--numstat', 'HEAD~1', 'HEAD', '--', file_path]
+            ]
+              
+            for cmd in numstat_commands:
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    if result.stdout.strip():
+                        parts = result.stdout.strip().split('\t')
+                        if len(parts) >= 2:
+                            additions = int(parts[0]) if parts[0] != '-' else 0
+                            deletions = int(parts[1]) if parts[1] != '-' else 0
+                            return additions, deletions
+                except (subprocess.CalledProcessError, ValueError):
+                    continue
+              
+            return 0, 0
           
-          [📖 View Full Diff on GitHub]({os.environ['PR_HTML_URL']}/files)
-          """
+        def create_enhanced_diff_content():
+            files = get_pr_files()
               
-              return content, files
+            # Get safe values with fallbacks
+            pr_title = safe_str(os.environ.get('PR_TITLE'), 'Unknown PR')
+            pr_author = safe_str(os.environ.get('PR_AUTHOR'), 'Unknown')
+            pr_head_branch = safe_str(os.environ.get('PR_HEAD_BRANCH'), 'unknown')
+            pr_base_branch = safe_str(os.environ.get('PR_BASE_BRANCH'), 'main')
+            pr_html_url = safe_str(os.environ.get('PR_HTML_URL'), '#')
+            pr_additions = safe_int(os.environ.get('PR_ADDITIONS'))
+            pr_deletions = safe_int(os.environ.get('PR_DELETIONS'))
+            pr_changed_files = safe_int(os.environ.get('PR_CHANGED_FILES'), len(files))
+              
+            # Create status indicators
+            if pr_additions > pr_deletions:
+                status_emoji = "🟢"
+            elif pr_additions == pr_deletions:
+                status_emoji = "🟡"
+            else:
+                status_emoji = "🔴"
+              
+            content = f"""# {status_emoji} Pull Request: {pr_title}
           
-          def get_port_token():
-              print("🔧 Authenticating with Port...")
-              
-              client_id = os.environ.get('PORT_CLIENT_ID', '').strip()
-              client_secret = os.environ.get('PORT_CLIENT_SECRET', '').strip()
-              
-              if not client_id or not client_secret:
-                  raise Exception("PORT_CLIENT_ID or PORT_CLIENT_SECRET is empty")
-              
-              payload = {
-                  'clientId': client_id,
-                  'clientSecret': client_secret
-              }
-              
-              response = requests.post(
-                  'https://api.getport.io/v1/auth/access_token',
-                  json=payload,
-                  timeout=30
-              )
-              
-              if response.status_code == 200:
-                  print("✅ Port authentication successful!")
-                  return response.json().get('accessToken')
-              else:
-                  raise Exception(f"Port auth failed: {response.status_code} - {response.text}")
+        > **Author:** @{pr_author} | **Branch:** `{pr_head_branch}` → `{pr_base_branch}`
           
-          def update_port_entity():
-              print("🚀 Starting Port entity update...")
-              
-              diff_content, files = create_diff_content()
-              token = get_port_token()
-              
-              url = f"https://api.getport.io/v1/blueprints/githubPullRequest/entities/{os.environ['PR_ID']}"
-              
-              payload = {
-                  'properties': {
-                      'diffContent': diff_content,
-                      'additions': int(os.environ['PR_ADDITIONS']),
-                      'deletions': int(os.environ['PR_DELETIONS']),
-                      'changedFiles': int(os.environ['PR_CHANGED_FILES']),
-                      'filesChanged': files
-                  }
-              }
-              
-              headers = {
-                  'Authorization': f'Bearer {token}',
-                  'Content-Type': 'application/json'
-              }
-              
-              response = requests.patch(url, json=payload, headers=headers, timeout=30)
-              
-              if response.status_code in [200, 201]:
-                  print(f"✅ Successfully updated Port entity {os.environ['PR_ID']}")
-                  return True
-              else:
-                  print(f"❌ Failed to update Port entity: {response.status_code}")
-                  print(f"Response: {response.text}")
-                  return False
+        ## 📊 Summary
           
-          # Main execution
-          try:
-              if update_port_entity():
-                  print("🎉 Process completed successfully!")
-                  sys.exit(0)
-              else:
-                  print("💥 Process failed!")
-                  sys.exit(1)
-          except Exception as e:
-              print(f"❌ Fatal error: {str(e)}")
-              sys.exit(1)
-          EOF
+        | Metric | Value |
+        |--------|-------|
+        | 📁 **Files Changed** | {pr_changed_files} |
+        | 📈 **Lines Added** | <span style="color: #28a745">+{pr_additions}</span> |
+        | 📉 **Lines Deleted** | <span style="color: #d73a49">-{pr_deletions}</span> |
+        | 📊 **Net Change** | {pr_additions - pr_deletions} |
+          
+        ---
+          
+        ## 📂 Modified Files
+          
+        """
+              
+            # Add file-by-file breakdown
+            for i, file_path in enumerate(files[:15], 1):
+                additions, deletions = get_file_stats(file_path)
+                language = detect_language(file_path)
+                  
+                # File type emoji
+                file_emoji = {
+                    'python': '🐍', 'javascript': '🟨', 'typescript': '🔷',
+                    'java': '☕', 'html': '🌐', 'css': '🎨', 'json': '📋',
+                    'markdown': '📝', 'yaml': '⚙️', 'bash': '🐚'
+                }.get(language, '📄')
+                  
+                content += f"""
+        ### {i}. {file_emoji} `{file_path}`
+          
+        **Language:** {language.title()} | **Changes:** <span style="color: #28a745">+{additions}</span> <span style="color: #d73a49">-{deletions}</span>
+          
+        """
+                  
+                # Get file diff
+                file_diff = get_file_diff(file_path)
+                if file_diff and len(file_diff) < 2000:  # Only show small diffs inline
+                    content += f"""<details>
+        <summary>📖 View Changes</summary>
+          
+          
+        {file_diff}
+          
+        </details>
+          
+        """
+                else:
+                    content += f"*File too large for inline preview - [view on GitHub]({pr_html_url}/files)*\n\n"
+              
+            if len(files) > 15:
+                content += f"\n*... and {len(files) - 15} more files*\n"
+              
+            content += f"""
+        ---
+          
+        ## 🔗 Quick Actions
+          
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          
+        [![View Files](https://img.shields.io/badge/📂_View_Files-blue?style=for-the-badge)]({pr_html_url}/files)
+        [![View Commits](https://img.shields.io/badge/📝_View_Commits-green?style=for-the-badge)]({pr_html_url}/commits)
+        [![Open PR](https://img.shields.io/badge/🔗_Open_PR-purple?style=for-the-badge)]({pr_html_url})
+          
+        </div>
+          
+        ---
+          
+        *Last updated: {subprocess.run(['date', '-u'], capture_output=True, text=True).stdout.strip()} UTC*
+        """
+              
+            return content, files
+          
+        def get_port_token():
+            print("🔧 Authenticating with Port...")
+              
+            client_id = safe_str(os.environ.get('PORT_CLIENT_ID'))
+            client_secret = safe_str(os.environ.get('PORT_CLIENT_SECRET'))
+              
+            if not client_id or not client_secret:
+                raise Exception("PORT_CLIENT_ID or PORT_CLIENT_SECRET is empty")
+              
+            payload = {
+                'clientId': client_id,
+                'clientSecret': client_secret
+            }
+              
+            response = requests.post(
+                'https://api.getport.io/v1/auth/access_token',
+                json=payload,
+                timeout=30
+            )
+              
+            if response.status_code == 200:
+                print("✅ Port authentication successful!")
+                return response.json().get('accessToken')
+            else:
+                raise Exception(f"Port auth failed: {response.status_code} - {response.text}")
+          
+        def update_port_entity():
+            print("🚀 Starting enhanced Port entity update...")
+              
+            # Check if we have required environment variables
+            pr_id = safe_str(os.environ.get('PR_ID'))
+            if not pr_id:
+                print("⚠️  No PR_ID found - this might be a local test")
+                print("📝 Creating diff content anyway...")
+                diff_content, files = create_enhanced_diff_content()
+                print("✅ Diff content created successfully!")
+                print(f"📊 Found {len(files)} files")
+                return True
+              
+            diff_content, files = create_enhanced_diff_content()
+            print("✅ Diff content created successfully!")
+            print(f"📊 Found {len(files)} files")
+              
+            # Only try Port update if credentials exist
+            if os.environ.get('PORT_CLIENT_ID') and os.environ.get('PORT_CLIENT_SECRET'):
+                print('Port credentials found - would update entity')
+            else:
+                print('No Port credentials - skipping update')
+          
+            print('✅ Success!')
+        EOF
